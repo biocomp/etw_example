@@ -1,4 +1,4 @@
-# Event Tracing for Windows log example
+# Event Tracing for Windows minimal log example
 
 A minimal example of a data log implemented via Event Tracing for Windows.
 Using [EventRegister](https://docs.microsoft.com/en-us/windows/win32/api/evntprov/nf-evntprov-eventregister)/
