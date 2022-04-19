@@ -8,6 +8,7 @@
 #include <format>
 #include <cstdio>
 
+#define INITGUID
 #include <Windows.h>
 #include <evntrace.h>
 #include <evntcons.h>
@@ -48,12 +49,13 @@ namespace Consumers {
         std::function<void(const EVENT_RECORD&)> m_callback;
     };
 
-    std::vector<std::vector<std::byte>> ReadRecords(GUID providerId, const std::filesystem::path& file) {
+    std::vector<std::vector<std::byte>> ReadRecords(const std::filesystem::path& file) {
         std::vector<std::vector<std::byte>> results;
         EVENT_TRACE_LOGFILEA traceFile;
 
-        EventHandler handler{[&providerId, &results](const EVENT_RECORD& evt) {
-            if (providerId == evt.EventHeader.ProviderId) {
+        EventHandler handler{[&results](const EVENT_RECORD& evt) {
+            // Skip metadata records with predefined EventTraceGuid guid.
+            if (::IsEqualGUID(evt.EventHeader.ProviderId, EventTraceGuid) == 0) {
                 const std::byte* data{static_cast<const std::byte*>(evt.UserData)};
                 const auto size{evt.UserDataLength};
                 results.emplace_back(data, data + size);
@@ -97,17 +99,20 @@ struct Fixture
 };
 
 template <typename... TArgs>
-void Format(std::string_view message, TArgs&&... args)
-{
+void Format(std::string_view message, TArgs&&... args) {
     std::printf("%s", std::format(message, std::forward<TArgs>(args)...).c_str());
 }
 
-int main()
-{
-    try
-    {
-        Fixture fixture;
-        GUID providerId;
+template <typename... TArgs>
+void Error(std::string_view message, TArgs&&... args) {
+    Format("## Error: {}", std::format(message, std::forward<TArgs>(args)...));
+}
+
+int main() {
+    try {
+        const Fixture fixture;
+
+        // Make sure log dies before reading the messages 
         {
             EtwLog::MiniLog log{"Mini logger", fixture.TempFolder.string(), 4};
     
@@ -115,21 +120,21 @@ int main()
             std::array<std::byte, sizeof(hello)> helloBytes;
             std::memcpy(helloBytes.data(), hello, sizeof(hello));
             log(helloBytes);
-
-            providerId = log.GetProviderId();
         }
 
-        const auto records{Consumers::ReadRecords(providerId, fixture.TempFolder / "log.etl")};
-        if (records.size() != 1)
-        {
-            Format("Error: Found {} records instead of 1", records.size());
+        const auto records{Consumers::ReadRecords(fixture.TempFolder / "log.etl")};
+        if (records.size() != 1) {
+            Error("Found {} records instead of 1", records.size());
         }
 
-        Format("Found one record, as expected, with value '{}'", std::string{reinterpret_cast<const char*>(records[0].data()), records[0].size() - 1});
+        const auto oneRecord{std::string{reinterpret_cast<const char*>(records[0].data()), records[0].size() - 1}};
+        if (oneRecord != "Hello World!") {
+            Error("Found one record, with unexpected value '{}'", oneRecord);
+        } else {
+            Format("Found one record, as expected, with value '{}'", oneRecord);
+        }
     }
-    catch (const std::exception& e)
-    {
-        std::puts("Error----");
-        Format("Error: Failed with {}", e.what());
+    catch (const std::exception& e) {
+        Error("Failed with {}", e.what());
     }
 }

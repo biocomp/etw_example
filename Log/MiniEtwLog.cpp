@@ -16,8 +16,8 @@
 using EtwLog::MiniLog;
 
 
-__declspec(noreturn) void EtwLog::VerifyHResult(std::uint32_t hresult, std::string_view additionalInfo, std::optional<std::uint32_t> expectedGoodResult) {
-    if (expectedGoodResult && hresult != *expectedGoodResult || !SUCCEEDED(hresult)) {
+void EtwLog::VerifyHResult(std::uint32_t hresult, std::string_view additionalInfo, std::uint32_t expectedGoodResult) {
+    if (hresult != expectedGoodResult) {
         std::error_code error{static_cast<int>(hresult), std::system_category()};
 
         // If error was not properly formatted.
@@ -83,8 +83,8 @@ namespace
             char LogFilePath[1024]; // Arbitrary max size for the buffer
         };
 
-        class EnabledProvider
-        {
+        /// @brief RAII wrapper around enabling/disabling provider for the session.
+        class EnabledProvider {
         public:
             EnabledProvider(TRACEHANDLE sessionHandle, const GUID& providerIdToEnable) : SessionHandle{sessionHandle}, EnabledProviderId{providerIdToEnable} {
                 VerifyHResult(::EnableTraceEx2(
@@ -120,7 +120,7 @@ namespace
         };
 
         /// @brief Event session created by controller.
-        /// In this case, the same app is controller as well.
+        /// In this case, the same app that produces the events is the controller as well.
         class Session {
         public:
             Session(const GUID& sessionId, const char* sessionName, std::string_view logFileName, std::size_t bufferSize) : m_properties(sessionId, bufferSize, logFileName) {
@@ -128,6 +128,9 @@ namespace
 
                 // Creates the session
                 auto result{::StartTraceA(&Handle, sessionName, &m_properties.Properties)};
+
+                // If session is already present, close it and restart.
+                // Sessions are a limited system-wide resource, so creating a new one (with, say, unique suffix added to the base name) is not advised.
                 if (result == ERROR_ALREADY_EXISTS) {
                     DestroySession(sessionName);
                     result = ::StartTraceA(&Handle, sessionName, &m_properties.Properties);
@@ -172,7 +175,7 @@ namespace
 
 class EtwLog::MiniLog::Impl {
 public:
-    Impl(std::string_view sessionName, std::string_view outputFolder, std::size_t bufferSize) :
+    Impl(const char* sessionName, std::string_view outputFolder, std::size_t bufferSize) :
         m_session{m_sessionId, std::string{sessionName}.c_str(), std::string{outputFolder} + "\\log.etl", bufferSize},
         m_enabledProvider{m_session.EnableProvider(m_providerId)},
         m_provider{m_providerId}
@@ -201,13 +204,20 @@ private:
     const GUID m_sessionId{MakeGuid()};
     const GUID m_providerId{MakeGuid()};
 
+    /// @brief Create ETW session
     Controllers::Session m_session;
+
+    /// @brief Enable the provider with m_providerId in it.
     Controllers::EnabledProvider m_enabledProvider;
+
+
+    /// @brief Create the provider and use it for event logging.
+    /// @note: It seems we need to create the provider AFTER the session was created and the provider was enabled in it. 
+    /// Otherwise, the events would not reach the log file until extra ::ControlTrace is called for the session.
     Providers::Provider m_provider;
 };
 
-EtwLog::MiniLog::MiniLog(std::string_view sessionName, std::string_view outputFolder, std::size_t bufferSize) : m_impl{std::make_unique<Impl>(sessionName, outputFolder, bufferSize)} {}
+EtwLog::MiniLog::MiniLog(const char* sessionName, std::string_view outputFolder, std::size_t bufferSize) : m_impl{std::make_unique<Impl>(sessionName, outputFolder, bufferSize)} {}
 EtwLog::MiniLog::~MiniLog() = default;
 
 void EtwLog::MiniLog::operator()(std::span<std::byte> message) const { m_impl->Write(message); }
-const GUID& EtwLog::MiniLog::GetProviderId() const noexcept { return m_impl->GetProviderId(); }

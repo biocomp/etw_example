@@ -5,25 +5,31 @@
 #include <string_view>
 #include <optional>
 
-struct _GUID;
-using GUID = _GUID;
-
 namespace EtwLog
 {
-    __declspec(noreturn) void VerifyHResult(std::uint32_t hresult, std::string_view additionalInfo, std::optional<std::uint32_t> expectedGoodResult = {});
+    void VerifyHResult(std::uint32_t hresult, std::string_view additionalInfo, std::uint32_t expectedGoodResult);
 
     class MiniLog
     {
     public:
-        MiniLog(std::string_view sessionName, std::string_view outputFolder, std::size_t bufferSize);
+        /// @brief Constructs the event provider, event session and enables the provider inside the session.
+        /// @param sessionName - unique name of the ETW session created internally.
+        /// @param outputFolder
+        /// @param bufferSize - Kilobytes of memory allocated for each event tracing session buffer.
+        MiniLog(
+            const char* sessionName, 
+            std::string_view outputFolder, 
+            std::size_t bufferSize);
         ~MiniLog();
 
+        /// @brief Uses EventWrite API to write the \a message into the provider.
+        /// @param message 
         void operator()(std::span<std::byte> message) const;
-
-        const GUID& GetProviderId() const noexcept;
 
     private:
         class Impl;
+
+        /// @brief Using PIMPL idiom to not require Windows.h with this header.
         std::unique_ptr<Impl> m_impl;
     };
 } // EtwLog
