@@ -22,9 +22,12 @@ namespace EtwLog
             std::size_t bufferSize);
         ~MiniLog();
 
+        MiniLog(MiniLog&&) noexcept;
+        MiniLog& operator=(MiniLog&&) noexcept;
+
         /// @brief Uses EventWrite API to write the \a message into the provider.
         /// @param message 
-        void operator()(std::span<std::byte> message) const;
+        void operator()(std::span<const std::byte> message) const;
 
     private:
         class Impl;

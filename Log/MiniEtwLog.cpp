@@ -12,6 +12,7 @@
 #include <optional>
 #include <system_error>
 #include <array>
+#include <filesystem>
 
 using EtwLog::MiniLog;
 
@@ -51,7 +52,8 @@ namespace
     namespace Controllers {
         /// @brief EVENT_TRACE_PROPERTIES has weird requirements that session name and log file path 
         /// buffers are located after this structure in memory, and their offsets are specified instead of actual strings.
-        /// This structure helps to handle that.
+        /// This structure helps to handle that. See: https://docs.microsoft.com/en-us/windows/win32/api/evntrace/nf-evntrace-starttracea 
+        /// and https://docs.microsoft.com/en-us/windows/win32/api/evntrace/ns-evntrace-event_trace_properties.
         struct EventTracePropertiesWithBuffers {
             EventTracePropertiesWithBuffers(const GUID& sessionId, std::size_t bufferSize, std::string_view logFilePath) {
                 ::ZeroMemory(this, sizeof(EventTracePropertiesWithBuffers));
@@ -62,9 +64,13 @@ namespace
 
                 Properties.Wnode.Flags = WNODE_FLAG_TRACED_GUID;
                 Properties.Wnode.ClientContext = 1; //QPC clock resolution
-                //Properties.Wnode.Guid = sessionId;
+                Properties.Wnode.Guid = sessionId; // For private session, use the Provider's id instead of a unique session ID.
                 
-                Properties.LogFileMode = EVENT_TRACE_FILE_MODE_SEQUENTIAL;
+                // See: https://docs.microsoft.com/en-us/windows/win32/etw/logging-mode-constants
+                Properties.LogFileMode = 
+                    EVENT_TRACE_FILE_MODE_SEQUENTIAL // - write events sequentially till they reach max file size, then stop.
+                    | EVENT_TRACE_PRIVATE_LOGGER_MODE // Private logger (not accessible outside of the process). Restrictions: There can be up to eight private session per process.
+                    | EVENT_TRACE_PRIVATE_IN_PROC; // Use in conjunction with EVENT_TRACE_PRIVATE_LOGGER_MODE to potentially allow non-elevated processes to create private sessions.
 
                 // Check if the buffer size is set correct.
                 static constexpr std::size_t c_maxBufferSize{16384};
@@ -79,8 +85,8 @@ namespace
             }
 
             EVENT_TRACE_PROPERTIES Properties;
-            char SessionName[256]; // Arbitrary max size for the buffer
-            char LogFilePath[1024]; // Arbitrary max size for the buffer
+            char SessionName[256]; // Arbitrary max size for the buffer, but 1024 is the system limit.
+            char LogFilePath[1024]; // Max supported filename length is 1024 (https://docs.microsoft.com/en-us/windows/win32/api/evntrace/ns-evntrace-event_trace_properties)
         };
 
         /// @brief RAII wrapper around enabling/disabling provider for the session.
@@ -171,17 +177,23 @@ namespace
             REGHANDLE Handle;
         };
     }
+
+    std::string_view MakeDirectories(std::string_view outputFolder)
+    {
+        std::filesystem::create_directories(outputFolder);
+        return outputFolder;
+    }
 }
 
 class EtwLog::MiniLog::Impl {
 public:
     Impl(const char* sessionName, std::string_view outputFolder, std::size_t bufferSize) :
-        m_session{m_sessionId, std::string{sessionName}.c_str(), std::string{outputFolder} + "\\log.etl", bufferSize},
-        m_enabledProvider{m_session.EnableProvider(m_providerId)},
-        m_provider{m_providerId}
+        m_provider{m_providerId},
+        m_session{m_providerId, sessionName, std::string{MakeDirectories(outputFolder)} + "\\log.etl", bufferSize},
+        m_enabledProvider{m_session.EnableProvider(m_providerId)}
     {}
 
-    void Write(std::span<std::byte> message) const {
+    void Write(std::span<const std::byte> message) const {
         constexpr static const EVENT_DESCRIPTOR c_descriptor = {
            0x1,    // Id
            0x1,    // Version
@@ -201,23 +213,23 @@ public:
     const GUID& GetProviderId() const noexcept { return m_providerId; }
 
 private:
-    const GUID m_sessionId{MakeGuid()};
     const GUID m_providerId{MakeGuid()};
+
+    /// @brief Create the provider and use it for event logging.
+    /// @note: For a private logging session, the provider needs to register its GUID first, then the session is created with the same GUID.
+    Providers::Provider m_provider;
 
     /// @brief Create ETW session
     Controllers::Session m_session;
 
     /// @brief Enable the provider with m_providerId in it.
     Controllers::EnabledProvider m_enabledProvider;
-
-
-    /// @brief Create the provider and use it for event logging.
-    /// @note: It seems we need to create the provider AFTER the session was created and the provider was enabled in it. 
-    /// Otherwise, the events would not reach the log file until extra ::ControlTrace is called for the session.
-    Providers::Provider m_provider;
 };
 
 EtwLog::MiniLog::MiniLog(const char* sessionName, std::string_view outputFolder, std::size_t bufferSize) : m_impl{std::make_unique<Impl>(sessionName, outputFolder, bufferSize)} {}
 EtwLog::MiniLog::~MiniLog() = default;
 
-void EtwLog::MiniLog::operator()(std::span<std::byte> message) const { m_impl->Write(message); }
+EtwLog::MiniLog::MiniLog(MiniLog&&) noexcept = default;
+EtwLog::MiniLog& EtwLog::MiniLog::MiniLog::operator=(MiniLog&&) noexcept = default;
+
+void EtwLog::MiniLog::operator()(std::span<const std::byte> message) const { m_impl->Write(message); }

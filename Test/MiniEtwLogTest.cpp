@@ -84,57 +84,109 @@ namespace Consumers {
     }
 }
 
-struct Fixture
-{
-    Fixture() {
-        std::filesystem::remove_all(std::filesystem::current_path() / "temp_out");
-        std::filesystem::create_directories(TempFolder);
+namespace {
+    struct Fixture
+    {
+        Fixture() {
+            std::filesystem::remove_all(std::filesystem::current_path() / "temp_out");
+        }
+
+        ~Fixture() {
+            std::filesystem::remove_all(TempFolder);
+        }
+
+        std::filesystem::path TempFolder{std::filesystem::current_path() / "temp_out" / std::to_string(std::random_device{}())};
+    };
+
+    template <typename... TArgs>
+    void Format(std::string_view message, TArgs&&... args) {
+        std::printf("%s", std::format(message, std::forward<TArgs>(args)...).c_str());
     }
 
-    ~Fixture() {
-        std::filesystem::remove_all(TempFolder);
+    template <typename... TArgs>
+    void Error(std::string_view message, TArgs&&... args) {
+        Format("## Error: {}", std::format(message, std::forward<TArgs>(args)...));
+        std::exit(1);
     }
 
-    std::filesystem::path TempFolder{std::filesystem::current_path() / "temp_out" / std::to_string(std::random_device{}())};
-};
+    void VerifyOneRecordWithText(const char* description, const std::filesystem::path& logFile, const std::string& expectedText) {
+        const auto records{Consumers::ReadRecords(logFile)};
+        if (records.size() != 1) {
+            Error("{}: Found {} records instead of 1 in '{}'\n", description, records.size(), logFile.string());
+        }
 
-template <typename... TArgs>
-void Format(std::string_view message, TArgs&&... args) {
-    std::printf("%s", std::format(message, std::forward<TArgs>(args)...).c_str());
+        const auto oneRecord{std::string{reinterpret_cast<const char*>(records[0].data()), records[0].size()}};
+        if (oneRecord != "Hello World!") {
+            Error("{}: Found one record, with unexpected value '{}'\n", description, oneRecord);
+        }
+        else {
+            Format("{}: Found one record, as expected, with value '{}'\n", description, oneRecord);
+        }
+    }
+
+    template <typename TTest>
+    void RunTest(const char* description, TTest&& test) {
+        try {
+            test();
+        } catch (const std::exception& e) {
+            Error("{}: Failed with {}\n", description, e.what());
+        }
+    }
+
+    std::vector<std::byte> MakeBytes(std::string_view fromText) {
+        std::vector<std::byte> bytes;
+        bytes.resize(fromText.size());
+        std::memcpy(bytes.data(), fromText.data(), fromText.size());
+        return bytes;
+    }
 }
 
-template <typename... TArgs>
-void Error(std::string_view message, TArgs&&... args) {
-    Format("## Error: {}", std::format(message, std::forward<TArgs>(args)...));
+void Construct_logger_and_log_one_record() {
+    RunTest(
+        "Construct_logger_and_log_one_record", 
+        []{
+            const Fixture fixture;
+
+            // Make sure the log dies before reading the messages 
+            {
+                EtwLog::MiniLog log{"Mini logger", fixture.TempFolder.string(), 4};
+                log(MakeBytes("Hello World!"));
+            }
+
+            VerifyOneRecordWithText("Construct_logger_and_log_one_record", fixture.TempFolder / "log.etl", "Hello, World!");
+        });
+}
+
+void Construct_many_logggers_to_find_logger_count_limits() {
+    RunTest(
+        "Construct_many_logggers_to_find_logger_count_limits",
+        [] {
+            const Fixture fixture;
+
+            static constexpr std::size_t c_logCount = 50;
+
+            // Make sure log dies before reading the messages 
+            {
+                std::vector<EtwLog::MiniLog> extraLogs;
+                for (std::size_t l = 0; l != c_logCount; ++l) {
+                    const auto suffix{std::to_string(l)};
+                    Format("Making logger #{}\n", l);
+                    extraLogs.emplace_back(EtwLog::MiniLog{("Mini logger" + suffix).c_str(), (fixture.TempFolder / suffix).string() , 4});
+                }
+
+                const auto message{MakeBytes("Hello World!")};
+                for (std::size_t l = 0; l != c_logCount; ++l) {
+                    extraLogs[l](message);
+                }
+            }
+
+            for (std::size_t l = 0; l != c_logCount; ++l) {
+                VerifyOneRecordWithText("Construct_many_logggers_to_find_logger_count_limits", fixture.TempFolder / std::to_string(l) / "log.etl", "Hello, World!");
+            }
+        });
 }
 
 int main() {
-    try {
-        const Fixture fixture;
-
-        // Make sure log dies before reading the messages 
-        {
-            EtwLog::MiniLog log{"Mini logger", fixture.TempFolder.string(), 4};
-    
-            static constexpr char hello[]{"Hello World!"};
-            std::array<std::byte, sizeof(hello)> helloBytes;
-            std::memcpy(helloBytes.data(), hello, sizeof(hello));
-            log(helloBytes);
-        }
-
-        const auto records{Consumers::ReadRecords(fixture.TempFolder / "log.etl")};
-        if (records.size() != 1) {
-            Error("Found {} records instead of 1", records.size());
-        }
-
-        const auto oneRecord{std::string{reinterpret_cast<const char*>(records[0].data()), records[0].size() - 1}};
-        if (oneRecord != "Hello World!") {
-            Error("Found one record, with unexpected value '{}'", oneRecord);
-        } else {
-            Format("Found one record, as expected, with value '{}'", oneRecord);
-        }
-    }
-    catch (const std::exception& e) {
-        Error("Failed with {}", e.what());
-    }
+    Construct_logger_and_log_one_record();
+    Construct_many_logggers_to_find_logger_count_limits();
 }
